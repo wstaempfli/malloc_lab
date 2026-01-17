@@ -24,7 +24,8 @@
 #define DSIZE 8             /* doubleword size */
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
-
+#define PACK(size, alloc) ((size) | (alloc))
+#define PUT(p, val) (*(unsigned int *)(p) = (val)) //write 4 bytes
 static char *heap_listp;
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
@@ -34,7 +35,16 @@ static char *heap_listp;
  */
 int mm_init(void)
 {
-    heap_listp = mem_sbrk(DSIZE);
+    //mem_sbrk return a pointer to -1 if something went wrong
+    if((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) return -1;
+
+    PUT(heap_listp, 0); //initial 4 bytes padding
+    PUT(heap_listp + (WSIZE), PACK(DSIZE, 1)); //prologue hdr
+    PUT(heap_listp + (2*WSIZE), PACK(DSIZE, 1)); //prologue ftr
+    PUT(heap_listp + (3*WSIZE), PACK(0, 1)); //epilogue hdr
+
+    heap_listp += (2*WSIZE);
+
     return 0;
 }
 
