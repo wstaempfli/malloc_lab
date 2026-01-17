@@ -1,0 +1,18 @@
+# Object files
+*.o
+
+# Binaries (The driver)
+mdriver
+
+# Editor backups
+*~
+*.swp
+.DS_Store
+.vscode/
+
+# The original tarball (optional)
+*.tar
+
+#
+*.pdf
+kenji.c
