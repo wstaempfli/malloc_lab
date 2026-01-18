@@ -13,17 +13,26 @@
 #include <stdlib.h>
 #include <assert.h>
 #include <unistd.h>
+#include <stdbool.h>
 #include <string.h>
 
 #include "mm.h"
 #include "memlib.h"
 
 /* single word (4) or double word (8) alignment */
-#define MINSIZE 16
+//adapt minsize for explicit list
 #define ALIGNMENT 8
 #define WSIZE 4             /* word size */
 #define DSIZE 8             /* doubleword size */
 #define CHUNKSIZE (1<<12)   /* Extend heap by this amount (bytes) */
+#define MINSIZE 24
+//------------EXPLICIT-LIST MACROS/vars-------------------------
+#define GET_NEXT(ptr) (*(char **)(ptr))
+#define GET_PREV(ptr) (*(char **)(ptr + 8))
+#define SET_NEXT(ptr, nxt) (GET_NEXT(ptr) = nxt)
+#define SET_PREV(ptr, prev) (GET_PREV(ptr) = prev)
+static char *free_listp = NULL; // Points to the first free block
+
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
@@ -40,14 +49,57 @@
 static char *heap_listp;
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
+//this function takes a node and inserts it at the start of the list 
+static void insert_node(void *bp)
+{
+    //NULL -> bp -> NULL
+    if(free_listp == NULL) {
+        SET_NEXT(bp, NULL);
+        SET_PREV(bp, NULL);
 
+        free_listp = bp;
+    } 
+    else {
+        //NULL <- bp <-> root (<)-> ...
+        SET_PREV(free_listp, bp); 
+        SET_NEXT(bp, free_listp); 
+        SET_PREV(bp, NULL);       
+
+        free_listp = bp;
+    }
+}
+//this function removes a node from the free list (watch out for edge cases)
+static void delete_node(void *bp){
+    char *prev, *nxt;
+    //delete root (what if only root exists?)
+    if(bp == free_listp){
+        free_listp = GET_NEXT(bp);
+        if(free_listp != NULL){
+            SET_PREV(free_listp, NULL);
+        }
+    } 
+    //delete last Node
+    else if(GET_NEXT(bp) == NULL) {
+        prev = GET_PREV(bp);
+        SET_NEXT(prev, NULL);
+    }
+    //delete middle node
+    else {
+        prev = GET_PREV(bp);
+        nxt = GET_NEXT(bp);
+        SET_NEXT(prev, nxt);
+        SET_PREV(nxt, prev);
+    }
+}
 //merges free blocks laying next to each other
-void *coalesce(void * ptr)
+static void *coalesce(void * ptr)
 {
     size_t last_a = GET_ALLOC(HDRP(LAST_BLKP(ptr)));
     size_t next_a = GET_ALLOC(HDRP(NEXT_BLKP(ptr)));
 
     if(last_a == 0){
+        //remove from free list
+        delete_node(LAST_BLKP(ptr));
         size_t cur_size = SIZE(HDRP(ptr));
         size_t prev_size = SIZE(HDRP(LAST_BLKP(ptr)));
         ptr = LAST_BLKP(ptr);
@@ -55,12 +107,14 @@ void *coalesce(void * ptr)
         PUT(FTRP(ptr), PACK(cur_size + prev_size, 0));
     }
     if(next_a == 0){
+        //remove from free list
+        delete_node(NEXT_BLKP(ptr));
         size_t cur_size = SIZE(HDRP(ptr));
         size_t next_size = SIZE(HDRP(NEXT_BLKP(ptr)));
         PUT(HDRP(ptr), PACK(cur_size + next_size, 0));
         PUT(FTRP(ptr), PACK(cur_size + next_size, 0));
     }
-
+    insert_node(ptr);
     return ptr;
 }
 
@@ -87,6 +141,7 @@ static void *extend_heap(size_t words)
  */
 int mm_init(void)
 {
+    free_listp = NULL;
     //mem_sbrk return a pointer to -1 if something went wrong
     if((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) return -1;
 
@@ -100,31 +155,33 @@ int mm_init(void)
     return 0;
 }
 //splits and allocates blocks
-void place(void *bp, size_t asize){
+static void place(void *bp, size_t asize){
     size_t bsize = SIZE(HDRP(bp));
     // unused part of block is large enough to be one on its own -> split it 
     if(bsize - asize >= MINSIZE){
         size_t remainder = bsize - asize;
+        delete_node(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         PUT(HDRP(NEXT_BLKP(bp)), PACK(remainder, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(remainder, 0));
+        insert_node(NEXT_BLKP(bp));
     } else {
+        delete_node(bp);
         PUT(HDRP(bp), PACK(bsize, 1));
         PUT(FTRP(bp), PACK(bsize, 1));
     }
 }
 //traverses List and returns pointer to first free fitting block
-void *find_fit(size_t size)
+static void *find_fit(size_t size)
 {
-    char * bp = heap_listp;
-    //while epilogue block not reached repeat
-    while(SIZE(HDRP(bp)) != 0){
-        if(!GET_ALLOC(HDRP(bp)) && SIZE(HDRP(bp)) >= size){
+    char * bp = free_listp;
+    while(bp != NULL){
+        if(SIZE(HDRP(bp)) >= size){
             return bp;
         }
-        bp = NEXT_BLKP(bp);
-    } 
+        bp = GET_NEXT(bp);
+    }
     return NULL;
 }
 /* 
@@ -137,7 +194,7 @@ void *mm_malloc(size_t size)
     char * bp;
     if(size == 0) return NULL;
     //Adjust block size to include overhead (+ DSIZE) and alignment reqs (mult of DSIZE).
-    if(size <= DSIZE){
+    if(size <= 2 * DSIZE){
         asize = MINSIZE;
     } else {
         asize = ALIGN(size) + DSIZE;
@@ -171,19 +228,33 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    void *oldptr = ptr;
-    void *newptr;
-    size_t copySize;
-    
-    newptr = mm_malloc(size);
-    if (newptr == NULL)
-      return NULL;
-    copySize = *(size_t *)((char *)oldptr - SIZE_T_SIZE);
-    if (size < copySize)
-      copySize = size;
-    memcpy(newptr, oldptr, copySize);
-    mm_free(oldptr);
-    return newptr;
+    bool next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr))); //is next block allocated?
+    size_t next_size = SIZE(HDRP(NEXT_BLKP(ptr))); //size of next block
+    size_t old_size = SIZE(HDRP(ptr)); //size of existing block
+    size_t new_size = ALIGN(size) + (2*WSIZE); 
+    size_t combined_size = old_size + next_size; //size of merged block
+    char *new_ptr;
+
+
+    if(size == 0) return NULL;
+    if(ptr == NULL) return mm_malloc(size);
+
+    if(new_size <= old_size) return ptr;
+
+    if(!next_alloc && (combined_size >= new_size)) {
+        delete_node(NEXT_BLKP(ptr));
+        PUT(HDRP(ptr), PACK(combined_size, 1));
+        PUT(FTRP(ptr), PACK(combined_size, 1));
+        return ptr;
+    } else {
+        new_ptr = mm_malloc(size);
+        if(new_ptr == NULL) { //check if alloc failed
+            return NULL;
+        }
+        memcpy(new_ptr, ptr, old_size - DSIZE); //copy old data to new block
+        mm_free(ptr);
+        return new_ptr;
+    }
 }
 
 
