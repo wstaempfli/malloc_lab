@@ -19,6 +19,7 @@
 #include "memlib.h"
 
 /* single word (4) or double word (8) alignment */
+#define MINSIZE 16
 #define ALIGNMENT 8
 #define WSIZE 4             /* word size */
 #define DSIZE 8             /* doubleword size */
@@ -40,7 +41,7 @@ static char *heap_listp;
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
 
-
+//merges free blocks laying next to each other
 void *coalesce(void * ptr)
 {
     size_t last_a = GET_ALLOC(HDRP(LAST_BLKP(ptr)));
@@ -62,9 +63,7 @@ void *coalesce(void * ptr)
 
     return ptr;
 }
-/* 
- * mm_init - initialize the malloc package.
- */
+
 //extend heap by words many words called (1) in init phase and (2) when no block is free
 static void *extend_heap(size_t words)
 {
@@ -83,6 +82,9 @@ static void *extend_heap(size_t words)
     return coalesce(bp);
 
 }
+/* 
+ * mm_init - initialize the malloc package.
+ */
 int mm_init(void)
 {
     //mem_sbrk return a pointer to -1 if something went wrong
@@ -94,24 +96,63 @@ int mm_init(void)
     PUT(heap_listp + (3*WSIZE), PACK(0, 1)); //epilogue hdr
 
     heap_listp += (2*WSIZE);
-    if(extend_heap(CHUNKSIZE/WSIZE) != 0) return -1;
+    if(extend_heap(CHUNKSIZE/WSIZE) == NULL) return -1;
     return 0;
 }
-
+//splits and allocates blocks
+void place(void *bp, size_t asize){
+    size_t bsize = SIZE(HDRP(bp));
+    // unused part of block is large enough to be one on its own -> split it 
+    if(bsize - asize >= MINSIZE){
+        size_t remainder = bsize - asize;
+        PUT(HDRP(bp), PACK(asize, 1));
+        PUT(FTRP(bp), PACK(asize, 1));
+        PUT(HDRP(NEXT_BLKP(bp)), PACK(remainder, 0));
+        PUT(FTRP(NEXT_BLKP(bp)), PACK(remainder, 0));
+    } else {
+        PUT(HDRP(bp), PACK(bsize, 1));
+        PUT(FTRP(bp), PACK(bsize, 1));
+    }
+}
+//traverses List and returns pointer to first free fitting block
+void *find_fit(size_t size)
+{
+    char * bp = heap_listp;
+    //while epilogue block not reached repeat
+    while(SIZE(HDRP(bp)) != 0){
+        if(!GET_ALLOC(HDRP(bp)) && SIZE(HDRP(bp)) >= size){
+            return bp;
+        }
+        bp = NEXT_BLKP(bp);
+    } 
+    return NULL;
+}
 /* 
  * mm_malloc - Allocate a block by incrementing the brk pointer.
  *     Always allocate a block whose size is a multiple of the alignment.
  */
 void *mm_malloc(size_t size)
 {
-    int newsize = ALIGN(size + SIZE_T_SIZE);
-    void *p = mem_sbrk(newsize);
-    if (p == (void *)-1)
-	return NULL;
-    else {
-        *(size_t *)p = size;
-        return (void *)((char *)p + SIZE_T_SIZE);
+    size_t asize, esize;
+    char * bp;
+    if(size == 0) return NULL;
+    //Adjust block size to include overhead (+ DSIZE) and alignment reqs (mult of DSIZE).
+    if(size <= DSIZE){
+        asize = MINSIZE;
+    } else {
+        asize = ALIGN(size) + DSIZE;
     }
+    
+    //find fit 
+    if((bp = find_fit(asize)) != NULL){
+        place(bp, asize);
+    } else {
+        //extend heap
+        esize = (CHUNKSIZE > asize) ? CHUNKSIZE : asize;
+        if((bp = extend_heap(esize/WSIZE)) == NULL) return NULL;
+        place(bp, asize);
+    }
+    return bp;
 }
 
 /*
