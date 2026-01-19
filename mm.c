@@ -26,13 +26,16 @@
 #define DSIZE 8             /* doubleword size */
 #define CHUNKSIZE (1<<12)   /* Extend heap by this amount (bytes) */
 #define MINSIZE 24
+
 //------------EXPLICIT-LIST MACROS/vars-------------------------
 #define GET_NEXT(ptr) (*(char **)(ptr))
 #define GET_PREV(ptr) (*(char **)(ptr + 8))
 #define SET_NEXT(ptr, nxt) (GET_NEXT(ptr) = nxt)
 #define SET_PREV(ptr, prev) (GET_PREV(ptr) = prev)
-static char *free_listp = NULL; // Points to the first free block
 
+//------------SEGREGATED-LIST MACROS/vars-------------------------
+#define LIST_LIMT 20
+void *seg_lists[LIST_LIMT];
 
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(size) (((size) + (ALIGNMENT-1)) & ~0x7)
@@ -49,33 +52,45 @@ static char *free_listp = NULL; // Points to the first free block
 static char *heap_listp;
 
 #define SIZE_T_SIZE (ALIGN(sizeof(size_t)))
-//this function takes a node and inserts it at the start of the list 
-static void insert_node(void *bp)
+
+static int get_idx(size_t size){
+    int list = 0;
+    size_t threshold = 32;
+    while(list < LIST_LIMT -1){
+        if(size <= threshold){
+            return list;
+        }
+        list++;
+        threshold <<= 1;
+    }
+    return list;
+}
+static void insert_node_seg(void *bp)
 {
-    //NULL -> bp -> NULL
-    if(free_listp == NULL) {
+    int idx = get_idx(SIZE(HDRP(bp)));
+    if(seg_lists[idx] == NULL){
+        seg_lists[idx] = bp;
         SET_NEXT(bp, NULL);
         SET_PREV(bp, NULL);
-
-        free_listp = bp;
-    } 
-    else {
-        //NULL <- bp <-> root (<)-> ...
-        SET_PREV(free_listp, bp); 
-        SET_NEXT(bp, free_listp); 
+    }else {
+        SET_PREV(seg_lists[idx], bp); 
+        SET_NEXT(bp, seg_lists[idx]); 
         SET_PREV(bp, NULL);       
 
-        free_listp = bp;
+        seg_lists[idx] = bp;
     }
 }
+
+
 //this function removes a node from the free list (watch out for edge cases)
-static void delete_node(void *bp){
+static void delete_node_seg(void *bp){
     char *prev, *nxt;
+    int idx = get_idx(SIZE(HDRP(bp)));
     //delete root (what if only root exists?)
-    if(bp == free_listp){
-        free_listp = GET_NEXT(bp);
-        if(free_listp != NULL){
-            SET_PREV(free_listp, NULL);
+    if(bp == seg_lists[idx]){
+        seg_lists[idx] = GET_NEXT(bp);
+        if(seg_lists[idx] != NULL){
+            SET_PREV(seg_lists[idx], NULL);
         }
     } 
     //delete last Node
@@ -99,7 +114,7 @@ static void *coalesce(void * ptr)
 
     if(last_a == 0){
         //remove from free list
-        delete_node(LAST_BLKP(ptr));
+        delete_node_seg(LAST_BLKP(ptr));
         size_t cur_size = SIZE(HDRP(ptr));
         size_t prev_size = SIZE(HDRP(LAST_BLKP(ptr)));
         ptr = LAST_BLKP(ptr);
@@ -108,13 +123,13 @@ static void *coalesce(void * ptr)
     }
     if(next_a == 0){
         //remove from free list
-        delete_node(NEXT_BLKP(ptr));
+        delete_node_seg(NEXT_BLKP(ptr));
         size_t cur_size = SIZE(HDRP(ptr));
         size_t next_size = SIZE(HDRP(NEXT_BLKP(ptr)));
         PUT(HDRP(ptr), PACK(cur_size + next_size, 0));
         PUT(FTRP(ptr), PACK(cur_size + next_size, 0));
     }
-    insert_node(ptr);
+    insert_node_seg(ptr);
     return ptr;
 }
 
@@ -141,7 +156,10 @@ static void *extend_heap(size_t words)
  */
 int mm_init(void)
 {
-    free_listp = NULL;
+    for(int i = 0; i < LIST_LIMT; i++){
+        seg_lists[i] = NULL;
+    }
+    
     //mem_sbrk return a pointer to -1 if something went wrong
     if((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) return -1;
 
@@ -160,14 +178,14 @@ static void place(void *bp, size_t asize){
     // unused part of block is large enough to be one on its own -> split it 
     if(bsize - asize >= MINSIZE){
         size_t remainder = bsize - asize;
-        delete_node(bp);
+        delete_node_seg(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
         PUT(HDRP(NEXT_BLKP(bp)), PACK(remainder, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(remainder, 0));
-        insert_node(NEXT_BLKP(bp));
+        insert_node_seg(NEXT_BLKP(bp));
     } else {
-        delete_node(bp);
+        delete_node_seg(bp);
         PUT(HDRP(bp), PACK(bsize, 1));
         PUT(FTRP(bp), PACK(bsize, 1));
     }
@@ -175,12 +193,18 @@ static void place(void *bp, size_t asize){
 //traverses List and returns pointer to first free fitting block
 static void *find_fit(size_t size)
 {
-    char * bp = free_listp;
-    while(bp != NULL){
-        if(SIZE(HDRP(bp)) >= size){
-            return bp;
+    int idx = get_idx(size);
+
+    //start at the correct index, but keep going up if empty
+    for(int i = idx;i < LIST_LIMT; i++) {
+        void *bp = seg_lists[i];
+
+        while(bp != NULL){
+            if(SIZE(HDRP(bp)) >= size){
+                return bp;
+            }
+            bp = GET_NEXT(bp);
         }
-        bp = GET_NEXT(bp);
     }
     return NULL;
 }
@@ -242,7 +266,7 @@ void *mm_realloc(void *ptr, size_t size)
     if(new_size <= old_size) return ptr;
 
     if(!next_alloc && (combined_size >= new_size)) {
-        delete_node(NEXT_BLKP(ptr));
+        delete_node_seg(NEXT_BLKP(ptr));
         PUT(HDRP(ptr), PACK(combined_size, 1));
         PUT(FTRP(ptr), PACK(combined_size, 1));
         return ptr;
