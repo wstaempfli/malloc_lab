@@ -252,33 +252,48 @@ void mm_free(void *ptr)
  */
 void *mm_realloc(void *ptr, size_t size)
 {
-    bool next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr))); //is next block allocated?
-    size_t next_size = SIZE(HDRP(NEXT_BLKP(ptr))); //size of next block
-    size_t old_size = SIZE(HDRP(ptr)); //size of existing block
-    size_t new_size = ALIGN(size) + (2*WSIZE); 
-    size_t combined_size = old_size + next_size; //size of merged block
-    char *new_ptr;
+     bool next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(ptr))); //is next block allocated?
+     size_t nextSize = SIZE(HDRP(NEXT_BLKP(ptr))); //size of next block
+     size_t oldSize = SIZE(HDRP(ptr));
+     size_t newSize = ALIGN(size) + (2*WSIZE); //size of new block
+     size_t combineSize = oldSize+nextSize; //size of combined block
+     char *newPtr;
 
-
-    if(size == 0) return NULL;
-    if(ptr == NULL) return mm_malloc(size);
-
-    if(new_size <= old_size) return ptr;
-
-    if(!next_alloc && (combined_size >= new_size)) {
-        delete_node_seg(NEXT_BLKP(ptr));
-        PUT(HDRP(ptr), PACK(combined_size, 1));
-        PUT(FTRP(ptr), PACK(combined_size, 1));
-        return ptr;
-    } else {
-        new_ptr = mm_malloc(size);
-        if(new_ptr == NULL) { //check if alloc failed
-            return NULL;
-        }
-        memcpy(new_ptr, ptr, old_size - DSIZE); //copy old data to new block
+     if (size == 0) {
         mm_free(ptr);
-        return new_ptr;
-    }
+        return NULL;
+     }
+
+     if (ptr == NULL) {
+        return mm_malloc(size);
+     }
+    
+        
+     if (newSize <= oldSize) {
+        return ptr;
+     } else {
+        
+        if (!next_alloc && (combineSize >= newSize)) {
+                delete_node_seg(NEXT_BLKP(ptr));
+                PUT(HDRP(ptr), PACK(combineSize, 1));
+                PUT(FTRP(ptr), PACK(combineSize, 1));
+                return ptr;
+        }else{
+            newPtr = mm_malloc(size);
+            if (newPtr == NULL) { //check if malloc failed
+                return NULL;
+            }
+            memcpy(newPtr, ptr, oldSize-DSIZE);
+            mm_free(ptr);
+            return newPtr;
+        }
+        
+
+
+
+     }
+
+
 }
 
 
