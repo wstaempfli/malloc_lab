@@ -13,6 +13,6 @@ mdriver
 # The original tarball (optional)
 *.tar
 
-#
+# Local course handouts/slides (do not publish)
 *.pdf
-kenji.c
+
